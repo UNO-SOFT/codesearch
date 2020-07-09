@@ -109,6 +109,9 @@ func main() {
 			args[i] = ""
 			continue
 		}
+		if s, err := os.Readlink(a); err == nil && s != "" {
+			a = s
+		}
 		args[i] = a
 	}
 	sort.Strings(args)
@@ -144,9 +147,6 @@ func main() {
 	ix.AddPaths(args)
 	for _, arg := range args {
 		log.Printf("index %s", arg)
-		if s, err := os.Readlink(arg); err == nil && s != "" {
-			arg = s
-		}
 		filepath.Walk(arg, func(path string, info os.FileInfo, err error) error {
 			if _, elem := filepath.Split(path); elem != "" {
 				// Skip various temporary or "hidden" files or directories.
