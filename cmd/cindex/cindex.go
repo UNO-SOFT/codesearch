@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011, 2020 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,16 +7,21 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
 	"sort"
+	"strings"
 
 	"github.com/google/codesearch/index"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/htmlindex"
 )
 
-var usageMessage = `usage: cindex [-list] [-reset] [path...]
+var usageMessage = `usage: cindex [-list] [-reset] [-encodings utf8,iso8859-2] [path...]
 
 Cindex prepares the trigram index for use by csearch.  The index is the
 file named by $CSEARCHINDEX, or else $HOME/.csearchindex.
@@ -54,10 +59,11 @@ func usage() {
 }
 
 var (
-	listFlag    = flag.Bool("list", false, "list indexed paths and exit")
-	resetFlag   = flag.Bool("reset", false, "discard existing index")
-	verboseFlag = flag.Bool("verbose", false, "print extra information")
-	cpuProfile  = flag.String("cpuprofile", "", "write cpu profile to this file")
+	listFlag      = flag.Bool("list", false, "list indexed paths and exit")
+	resetFlag     = flag.Bool("reset", false, "discard existing index")
+	verboseFlag   = flag.Bool("verbose", false, "print extra information")
+	cpuProfile    = flag.String("cpuprofile", "", "write cpu profile to this file")
+	encodingsFlag = flag.String("encodings", "", "what encodings to use - comma separated list")
 )
 
 func main() {
@@ -120,12 +126,27 @@ func main() {
 	if !*resetFlag {
 		file += "~"
 	}
+	var encodings []encoding.Encoding
+	for _, enc := range strings.Split(*encodingsFlag, ",") {
+		if enc = strings.TrimSpace(enc); enc == "" {
+			continue
+		}
+		e, err := htmlindex.Get(enc)
+		if err != nil {
+			log.Printf("%q: %+v", enc, err)
+			return
+		}
+		encodings = append(encodings, e)
+	}
 
 	ix := index.Create(file)
 	ix.Verbose = *verboseFlag
 	ix.AddPaths(args)
 	for _, arg := range args {
 		log.Printf("index %s", arg)
+		if s, err := os.Readlink(arg); err == nil && s != "" {
+			arg = s
+		}
 		filepath.Walk(arg, func(path string, info os.FileInfo, err error) error {
 			if _, elem := filepath.Split(path); elem != "" {
 				// Skip various temporary or "hidden" files or directories.
@@ -141,7 +162,12 @@ func main() {
 				return nil
 			}
 			if info != nil && info.Mode()&os.ModeType == 0 {
-				ix.AddFile(path)
+				r, err := openEncoded(path, encodings)
+				if err != nil {
+					return fmt.Errorf("%q: %w", path, err)
+				}
+				ix.Add(path, r)
+				r.Close()
 			}
 			return nil
 		})
@@ -157,4 +183,28 @@ func main() {
 	}
 	log.Printf("done")
 	return
+}
+
+func openEncoded(path string, encodings []encoding.Encoding) (io.ReadCloser, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	var found encoding.Encoding
+	for _, enc := range encodings {
+		r := enc.NewDecoder().Reader(fh)
+		if _, err = io.Copy(ioutil.Discard, r); err == nil {
+			found = enc
+		}
+		if _, err = fh.Seek(0, 0); err != nil {
+			return nil, err
+		}
+	}
+	if found == nil {
+		return fh, nil
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{found.NewDecoder().Reader(fh), fh}, nil
 }
